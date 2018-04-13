@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import numpy as np
 
@@ -75,6 +76,7 @@ def prepare_batch_input(insts, input_data_names, src_pad_idx, trg_pad_idx,
                                 [1, 1, trg_max_len, 1]).astype("float32")
 
     # These shape tensors are used in reshape_op.
+    """
     src_data_shape = np.array([len(insts), src_max_len, d_model], dtype="int32")
     trg_data_shape = np.array([len(insts), trg_max_len, d_model], dtype="int32")
     src_slf_attn_pre_softmax_shape = np.array(
@@ -89,6 +91,24 @@ def prepare_batch_input(insts, input_data_names, src_pad_idx, trg_pad_idx,
         [-1, trg_src_attn_bias.shape[-1]], dtype="int32")
     trg_src_attn_post_softmax_shape = np.array(
         trg_src_attn_bias.shape, dtype="int32")
+    """
+    # These shape tensors are used in reshape_op.
+    src_data_shape = np.array(
+        [-1, src_max_len, d_model], dtype="int32")
+    trg_data_shape = np.array(
+        [-1, trg_max_len, d_model], dtype="int32")
+    src_slf_attn_pre_softmax_shape = np.array(
+        [-1, src_slf_attn_bias.shape[-1]], dtype="int32")
+    src_slf_attn_post_softmax_shape = np.array(
+        [-1] + list(src_slf_attn_bias.shape[1:]), dtype="int32")
+    trg_slf_attn_pre_softmax_shape = np.array(
+        [-1, trg_slf_attn_bias.shape[-1]], dtype="int32")
+    trg_slf_attn_post_softmax_shape = np.array(
+        [-1] + list(trg_slf_attn_bias.shape[1:]), dtype="int32")
+    trg_src_attn_pre_softmax_shape = np.array(
+        [-1, trg_src_attn_bias.shape[-1]], dtype="int32")
+    trg_src_attn_post_softmax_shape = np.array(
+        [-1] + list(trg_src_attn_bias.shape[1:]), dtype="int32")
 
     lbl_word, lbl_weight = pad_batch_data(
         [inst[2] for inst in insts],
@@ -113,7 +133,6 @@ def prepare_batch_input(insts, input_data_names, src_pad_idx, trg_pad_idx,
 
 def main():
     place = fluid.CUDAPlace(0) if TrainTaskConfig.use_gpu else fluid.CPUPlace()
-    exe = fluid.Executor(place)
 
     sum_cost, avg_cost, predict, token_num = transformer(
         ModelHyperParams.src_vocab_size, ModelHyperParams.trg_vocab_size,
@@ -122,11 +141,13 @@ def main():
         ModelHyperParams.d_value, ModelHyperParams.d_model,
         ModelHyperParams.d_inner_hid, ModelHyperParams.dropout)
 
+    """
     lr_scheduler = LearningRateScheduler(ModelHyperParams.d_model,
                                          TrainTaskConfig.warmup_steps, place,
                                          TrainTaskConfig.learning_rate)
+    """
     optimizer = fluid.optimizer.Adam(
-        learning_rate=lr_scheduler.learning_rate,
+        learning_rate=TrainTaskConfig.learning_rate,
         beta1=TrainTaskConfig.beta1,
         beta2=TrainTaskConfig.beta2,
         epsilon=TrainTaskConfig.eps)
@@ -137,7 +158,7 @@ def main():
             paddle.dataset.wmt16.train(ModelHyperParams.src_vocab_size,
                                        ModelHyperParams.trg_vocab_size),
             buf_size=100000),
-        batch_size=TrainTaskConfig.batch_size)
+        batch_size=TrainTaskConfig.batch_size * TrainTaskConfig.num_gpus)
 
     # Program to do validation.
     test_program = fluid.default_main_program().clone()
@@ -146,7 +167,7 @@ def main():
     val_data = paddle.batch(
         paddle.dataset.wmt16.validation(ModelHyperParams.src_vocab_size,
                                         ModelHyperParams.trg_vocab_size),
-        batch_size=TrainTaskConfig.batch_size)
+        batch_size=TrainTaskConfig.batch_size * TrainTaskConfig.num_gpus)
 
     def test(exe):
         test_total_cost = 0
@@ -169,36 +190,71 @@ def main():
         return test_avg_cost, test_ppl
 
     # Initialize the parameters.
-    exe.run(fluid.framework.default_startup_program())
+    place = fluid.CUDAPlace(0)
+    startup_exe = fluid.Executor(place)
+    startup_exe.run(fluid.framework.default_startup_program())
+
+    exe = fluid.ParallelExecutor(
+        use_cuda=True,
+        loss_name=avg_cost.name if TrainTaskConfig.use_avg_cost
+            else sum_cost.name,
+        main_program=fluid.default_main_program())
+
+    """
     for pos_enc_param_name in pos_enc_param_names:
         pos_enc_param = fluid.global_scope().find_var(
             pos_enc_param_name).get_tensor()
         pos_enc_param.set(
             position_encoding_init(ModelHyperParams.max_length + 1,
                                    ModelHyperParams.d_model), place)
-
+    """
     for pass_id in xrange(TrainTaskConfig.pass_num):
-        pass_start_time = time.time()
         for batch_id, data in enumerate(train_data()):
-            if len(data) != TrainTaskConfig.batch_size:
+            if len(data) != TrainTaskConfig.batch_size * TrainTaskConfig.num_gpus:
                 continue
             data_input = prepare_batch_input(
                 data, encoder_input_data_names + decoder_input_data_names[:-1] +
                 label_data_names, ModelHyperParams.eos_idx,
                 ModelHyperParams.eos_idx, ModelHyperParams.n_head,
                 ModelHyperParams.d_model)
-            lr_scheduler.update_learning_rate(data_input)
-            outs = exe.run(fluid.framework.default_main_program(),
-                           feed=data_input,
-                           fetch_list=[sum_cost, avg_cost],
-                           use_program_cache=True)
+            new_data_input = dict()
+            for k, v in data_input.iteritems():
+                if k == "trg_word":
+                    t = np.reshape(v, [TrainTaskConfig.batch_size * TrainTaskConfig.num_gpus,
+                                       -1, 1])
+                elif k == "trg_pos":
+                    t = np.reshape(v, [TrainTaskConfig.batch_size * TrainTaskConfig.num_gpus,
+                                       -1, 1])
+                elif k == "src_word":
+                    t = np.reshape(v, [TrainTaskConfig.batch_size * TrainTaskConfig.num_gpus,
+                                       -1, 1])
+                elif k == "src_pos":
+                    t = np.reshape(v, [TrainTaskConfig.batch_size * TrainTaskConfig.num_gpus,
+                                       -1, 1])
+                elif k == "lbl_weight":
+                    t = np.reshape(v, [TrainTaskConfig.batch_size * TrainTaskConfig.num_gpus,
+                                       -1, 1])
+                elif k == "lbl_word":
+                    t = np.reshape(v, [TrainTaskConfig.batch_size * TrainTaskConfig.num_gpus,
+                                       -1, 1])
+                else:
+                    t = v
+                new_data_input[k] = t
+                # sys.stderr.write('%s %s\n' % (k, str(t.shape)))
+            # lr_scheduler.update_learning_rate(data_input)
+            start_t = time.time()
+            outs = exe.run([sum_cost.name, avg_cost.name],
+                           feed_dict=new_data_input)
+            end_t = time.time()
             sum_cost_val, avg_cost_val = np.array(outs[0]), np.array(outs[1])
-            print("epoch: %d, batch: %d, sum loss: %f, avg loss: %f, ppl: %f" %
-                  (pass_id, batch_id, sum_cost_val, avg_cost_val,
+            print("epoch: %d, batch: %d, time: %f, sum loss: %s, avg loss: %s"
+                  ", ppl: %f" %
+                  (pass_id, batch_id, (end_t - start_t),
+                   sum_cost_val, avg_cost_val,
                    np.exp([min(avg_cost_val[0], 100)])))
         # Validate and save the model for inference.
+        """
         val_avg_cost, val_ppl = test(exe)
-        pass_end_time = time.time()
         time_consumed = pass_end_time - pass_start_time
         print("epoch: %d, val avg loss: %f, val ppl: %f, "
               "consumed %fs" % (pass_id, val_avg_cost, val_ppl, time_consumed))
@@ -207,6 +263,7 @@ def main():
                          "pass_" + str(pass_id) + ".infer.model"),
             encoder_input_data_names + decoder_input_data_names[:-1],
             [predict], exe)
+        """
 
 
 if __name__ == "__main__":

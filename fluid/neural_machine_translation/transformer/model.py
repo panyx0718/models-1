@@ -1,3 +1,4 @@
+import sys
 from functools import partial
 import numpy as np
 
@@ -409,14 +410,14 @@ def make_inputs(input_data_names,
     Define the input data layers for the transformer model.
     """
     input_layers = []
-    batch_size = 1  # Only for the infer-shape in compile time.
+    batch_size = TrainTaskConfig.batch_size  # Only for the infer-shape in compile time.
     # The shapes here act as placeholder and are set to pass the infer-shape in
     # compile time.
     # The actual data shape of word is:
     # [batch_size * max_len_in_batch, 1]
     word = layers.data(
         name=input_data_names[len(input_layers)],
-        shape=[batch_size * max_length, 1],
+        shape=[batch_size, max_length, 1],
         dtype="int64",
         append_batch_size=False)
     input_layers += [word]
@@ -425,7 +426,7 @@ def make_inputs(input_data_names,
     # [batch_size * max_len_in_batch, 1]
     pos = layers.data(
         name=input_data_names[len(input_layers)],
-        shape=[batch_size * max_length, 1],
+        shape=[batch_size, max_length, 1],
         dtype="int64" if is_pos else "float32",
         append_batch_size=False)
     input_layers += [pos]
@@ -502,7 +503,8 @@ def make_inputs(input_data_names,
             dtype="float32",
             append_batch_size=False)
         input_layers += [enc_output]
-
+    # for inp in input_layers:
+    #     sys.stderr.write('%s %s\n' % (inp.name, str(inp.shape)))
     return input_layers
 
 
@@ -582,6 +584,14 @@ def transformer(
         data_shape_flag=False,
         slf_attn_shape_flag=False,
         src_attn_shape_flag=False)
+
+    gold = layers.reshape(gold,
+                          [-1, 1])
+    gold.stop_gradient = True
+    weights = layers.reshape(weights,
+                             [-1, 1])
+    weights.stop_gradient = True
+
     cost = layers.softmax_with_cross_entropy(logits=predict, label=gold)
     weighted_cost = cost * weights
     sum_cost = layers.reduce_sum(weighted_cost)
@@ -623,6 +633,13 @@ def wrap_encoder(src_vocab_size,
         src_word, src_pos, src_slf_attn_bias, src_data_shape, \
             slf_attn_pre_softmax_shape, slf_attn_post_softmax_shape = \
             enc_inputs
+
+    src_word = layers.reshape(src_word,
+                              [-1, 1])
+    src_word.stop_gradient = True
+    src_pos = layers.reshape(src_pos,
+                             [-1, 1])
+    src_pos.stop_gradient = True
     enc_input = prepare_encoder(
         src_word,
         src_pos,
@@ -682,7 +699,12 @@ def wrap_decoder(trg_vocab_size,
             trg_data_shape, slf_attn_pre_softmax_shape, \
             slf_attn_post_softmax_shape, src_attn_pre_softmax_shape, \
             src_attn_post_softmax_shape = dec_inputs
-
+    trg_word = layers.reshape(trg_word,
+                              [-1, 1])
+    trg_word.stop_gradient = True
+    trg_pos = layers.reshape(trg_pos,
+                             [-1, 1])
+    trg_pos.stop_gradient = True
     dec_input = prepare_decoder(
         trg_word,
         trg_pos,
