@@ -4,6 +4,7 @@ import numpy as np
 
 import paddle
 import paddle.fluid as fluid
+import paddle.fluid.profiler as profiler
 
 from model import transformer, position_encoding_init
 from optim import LearningRateScheduler
@@ -229,9 +230,13 @@ def main():
                             ModelHyperParams.max_length + 1,
                             ModelHyperParams.d_model)
                         feed_list[place_id][pos_enc_param_name] = tensor
-
-            outs = train_exe.run(fetch_list=[sum_cost.name, token_num.name],
-                                 feed=feed_list)
+            if batch_id == 5:
+              with profiler.profiler('All', 'total', '/tmp/profile_transform') as prof:
+                  outs = train_exe.run(fetch_list=[sum_cost.name, token_num.name],
+                                       feed=feed_list)
+            else:
+              outs = train_exe.run(fetch_list=[sum_cost.name, token_num.name],
+                                   feed=feed_list)
             sum_cost_val, token_num_val = np.array(outs[0]), np.array(outs[1])
             total_sum_cost = sum_cost_val.sum(
             )  # sum the cost from multi devices
