@@ -50,9 +50,9 @@ def network(src, dst, vocab_size, hid_size, init_low_bound, init_high_bound):
                               initializer=fluid.initializer.Uniform(
                                   low=init_low_bound, high=init_high_bound),
                               learning_rate=gru_lr_x))
-    gru_h0 = fluid.layers.dynamic_gru(
+    gru_h0, _ = fluid.layers.dynamic_lstm(
         input=fc0,
-        size=hid_size,
+        size=hid_size * 3,
         param_attr=fluid.ParamAttr(
             initializer=fluid.initializer.Uniform(
                 low=init_low_bound, high=init_high_bound),
@@ -119,6 +119,8 @@ def train(train_reader,
     train_exe = fluid.ParallelExecutor(use_cuda=True, loss_name=avg_cost.name)
 
     total_time = 0.0
+    total_duration = 0.0
+    total_steps = 0
     fetch_list = [avg_cost.name]
     for pass_idx in six.moves.xrange(pass_num):
         epoch_idx = pass_idx + 1
@@ -133,15 +135,19 @@ def train(train_reader,
                 [dat[0] for dat in data], place)
             lod_dst_wordseq = utils.to_lodtensor(
                 [dat[1] for dat in data], place)
+            start_time = time.time()
             ret_avg_cost = train_exe.run(feed={
                 "src_wordseq": lod_src_wordseq,
                 "dst_wordseq": lod_dst_wordseq
             },
                 fetch_list=fetch_list)
+            total_duration += (time.time() - start_time)
+            total_steps += 1
             avg_ppl = np.exp(ret_avg_cost[0])
             newest_ppl = np.mean(avg_ppl)
             if i % 100 == 0:
-                print("step:%d ppl:%.3f" % (i, newest_ppl))
+                print("step:%d ppl:%.3f, step_time: %.4f" %
+                      (i, newest_ppl, total_duration / total_steps))
 
         t1 = time.time()
         total_time += t1 - t0
